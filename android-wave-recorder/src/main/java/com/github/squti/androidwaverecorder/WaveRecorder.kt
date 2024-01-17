@@ -196,7 +196,7 @@ class WaveRecorder (
     /**
      * Stops audio recorder and release resources then writes recorded file headers.
      */
-    fun stopRecording() {
+    fun stopRecording(): File {
         if (recordingState == RecorderState.STOPPED) {
             throw IllegalStateException("Recording already stopped!")
         }
@@ -211,7 +211,7 @@ class WaveRecorder (
             ).writeHeader()
             recordingState = RecorderState.STOPPED
         }
-
+        return filePolicy.file
     }
 
     private fun isAudioRecorderInitialized(): Boolean =
