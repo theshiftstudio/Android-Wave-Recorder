@@ -1,9 +1,11 @@
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
+apply plugin: 'maven-publish'
+
 android {
     namespace 'com.github.squti.androidwaverecorder'
     defaultConfig {
-        compileSdk 33
+        compileSdk 34
         minSdkVersion 16
         targetSdkVersion 33
 
@@ -24,6 +26,12 @@ android {
     kotlinOptions {
         jvmTarget = JavaVersion.VERSION_17
     }
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+            withJavadocJar()
+        }
+    }
 }
 
 dependencies {
@@ -37,4 +45,18 @@ dependencies {
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+}
+
+publishing {
+    publications {
+        release(MavenPublication) {
+            groupId = 'com.github.shiftstudio'
+            artifactId = 'waverecorder'
+            version = '1.0.0'
+
+            afterEvaluate {
+                from components.release
+            }
+        }
+    }
 }
