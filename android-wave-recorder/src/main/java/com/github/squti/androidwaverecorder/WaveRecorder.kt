@@ -25,17 +25,23 @@
 package com.github.squti.androidwaverecorder
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.NoiseSuppressor
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.lang.IllegalStateException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.UUID
+import kotlin.properties.Delegates
 
 /**
  * The WaveRecorder class used to record Waveform audio file using AudioRecord class to get the audio stream in PCM encoding
@@ -43,27 +49,30 @@ import java.nio.ByteOrder
  * Kotlin Coroutine with IO dispatcher to writing input data on storage asynchronously.
  * @property filePath the path of the file to be saved.
  */
-class WaveRecorder(private var filePath: String) {
+class WaveRecorder (
+    private val coroutineScope: CoroutineScope,
     /**
      * Configuration for recording audio file.
      */
-    var waveConfig: WaveConfig = WaveConfig()
-
+    waveConfig: WaveConfig.() -> Unit = { },
     /**
      * Register a callback to be invoked in every recorded chunk of audio data
      * to get max amplitude of that chunk.
      */
-    var onAmplitudeListener: ((Int) -> Unit)? = null
-
+    var onAmplitudeListener: (Int) -> Unit = { },
     /**
      * Register a callback to be invoked in recording state changes
      */
-    var onStateChangeListener: ((RecorderState) -> Unit)? = null
-
+    var onStateChangedListener: (oldValue: RecorderState, newValue: RecorderState) -> Unit = { _, _ -> },
     /**
      * Register a callback to get elapsed recording time in seconds
      */
-    var onTimeElapsed: ((Long) -> Unit)? = null
+    var onTimeElapsed: (Long) -> Unit = { },
+) {
+
+    private lateinit var filePolicy: FilePolicy
+
+    var waveConfig: WaveConfig = WaveConfig().apply(waveConfig)
 
     /**
      * Activates Noise Suppressor during recording if the device implements noise
@@ -78,18 +87,40 @@ class WaveRecorder(private var filePath: String) {
     var audioSessionId: Int = -1
         private set
 
-    private var isRecording = false
-    private var isPaused = false
-    private lateinit var audioRecorder: AudioRecord
+    var recordingState: RecorderState
+            by Delegates.observable(RecorderState.STOPPED) { _, oldValue, newValue ->
+                onStateChangedListener(oldValue, newValue)
+            }
+        private set
+
+    private var audioRecorder: AudioRecord? = null
     private var noiseSuppressor: NoiseSuppressor? = null
     private var timeModulus = 1
 
+    fun startRecording(
+        context: Context,
+        fileName: String,
+    ): File = startRecording(
+        filePolicy = FilePolicy.InternalStorage(context, fileName)
+    )
+
+    fun startRecording(
+        filePath: String,
+    ): File = startRecording(
+        filePolicy = FilePolicy.ExternalStorage(filePath)
+    )
 
     /**
      * Starts audio recording asynchronously and writes recorded data chunks on storage.
      */
     @SuppressLint("MissingPermission")
-    fun startRecording() {
+    fun startRecording(
+        filePolicy: FilePolicy,
+    ): File {
+        if (recordingState != RecorderState.STOPPED) {
+            throw IllegalStateException("Recording already started!")
+        }
+        this.filePolicy = filePolicy
 
         if (!isAudioRecorderInitialized()) {
             audioRecorder = AudioRecord(
@@ -107,52 +138,46 @@ class WaveRecorder(private var filePath: String) {
             if (waveConfig.channels == AudioFormat.CHANNEL_IN_STEREO)
                 timeModulus *= 2
 
-            audioSessionId = audioRecorder.audioSessionId
-
-            isRecording = true
-
-            audioRecorder.startRecording()
-
-            if (noiseSuppressorActive) {
-                noiseSuppressor = NoiseSuppressor.create(audioRecorder.audioSessionId)
-            }
-
-            onStateChangeListener?.let {
-                it(RecorderState.RECORDING)
-            }
-
-            GlobalScope.launch(Dispatchers.IO) {
-                writeAudioDataToStorage()
-            }
+            audioSessionId = audioRecorder?.audioSessionId ?: -1
         }
+
+        recordingState = RecorderState.RECORDING
+
+        audioRecorder?.startRecording()
+
+        if (noiseSuppressorActive && audioSessionId != -1) {
+            noiseSuppressor = NoiseSuppressor.create(audioSessionId)
+        }
+
+        coroutineScope.launch(Dispatchers.IO) {
+            writeAudioDataToStorage(filePolicy)
+        }
+
+        return filePolicy.file
     }
 
-    private suspend fun writeAudioDataToStorage() {
+    private suspend fun writeAudioDataToStorage(filePolicy: FilePolicy) {
         val bufferSize = AudioRecord.getMinBufferSize(
             waveConfig.sampleRate,
             waveConfig.channels,
             waveConfig.audioEncoding
         )
         val data = ByteArray(bufferSize)
-        val file = File(filePath)
-        val outputStream = file.outputStream()
-        while (isRecording) {
-            val operationStatus = audioRecorder.read(data, 0, bufferSize)
+
+        val file = filePolicy.file
+        val outputStream = filePolicy.fileOutputStream
+
+        while (recordingState == RecorderState.RECORDING && audioRecorder != null) {
+            val operationStatus = audioRecorder?.read(data, 0, bufferSize) ?: return
 
             if (AudioRecord.ERROR_INVALID_OPERATION != operationStatus) {
-                if (!isPaused) outputStream.write(data)
+                if (recordingState != RecorderState.PAUSED) outputStream.write(data)
 
                 withContext(Dispatchers.Main) {
-                    onAmplitudeListener?.let {
-                        it(calculateAmplitudeMax(data))
-                    }
-                    onTimeElapsed?.let {
-                        val audioLengthInSeconds: Long = file.length() / timeModulus
-                        it(audioLengthInSeconds)
-                    }
+                    val audioLengthInSeconds: Long = file.length() / timeModulus
+                    onAmplitudeListener(calculateAmplitudeMax(data))
+                    onTimeElapsed(audioLengthInSeconds)
                 }
-
-
             }
         }
 
@@ -167,51 +192,107 @@ class WaveRecorder(private var filePath: String) {
 
         return shortData.maxOrNull()?.toInt() ?: 0
     }
-    
-    /** Changes @property filePath to @param newFilePath
-     * Calling this method while still recording throws an IllegalStateException
-     */
-    fun changeFilePath(newFilePath: String) {
-        if (isRecording)
-            throw IllegalStateException("Cannot change filePath when still recording.")
-        else
-            filePath = newFilePath
-    }
 
     /**
      * Stops audio recorder and release resources then writes recorded file headers.
      */
     fun stopRecording() {
-
+        if (recordingState == RecorderState.STOPPED) {
+            throw IllegalStateException("Recording already stopped!")
+        }
         if (isAudioRecorderInitialized()) {
-            isRecording = false
-            isPaused = false
-            audioRecorder.stop()
-            audioRecorder.release()
+            audioRecorder?.stop()
+            audioRecorder?.release()
             audioSessionId = -1
-            WaveHeaderWriter(filePath, waveConfig).writeHeader()
-            onStateChangeListener?.let {
-                it(RecorderState.STOP)
-            }
+            WaveHeaderWriter(
+                file = filePolicy.file,
+                inputStream = filePolicy.fileInputStream,
+                waveConfig = waveConfig
+            ).writeHeader()
+            recordingState = RecorderState.STOPPED
         }
 
     }
 
     private fun isAudioRecorderInitialized(): Boolean =
-        this::audioRecorder.isInitialized && audioRecorder.state == AudioRecord.STATE_INITIALIZED
+        audioRecorder != null && audioRecorder?.state == AudioRecord.STATE_INITIALIZED
 
     fun pauseRecording() {
-        isPaused = true
-        onStateChangeListener?.let {
-            it(RecorderState.PAUSE)
-        }
+        recordingState = RecorderState.PAUSED
     }
 
     fun resumeRecording() {
-        isPaused = false
-        onStateChangeListener?.let {
-            it(RecorderState.RECORDING)
+        recordingState = RecorderState.RECORDING
+    }
+
+    fun update(
+        /**
+         * Configuration for recording audio file.
+         */
+        waveConfig: (WaveConfig.() -> Unit)? = null,
+        /**
+         * Register a callback to be invoked in every recorded chunk of audio data
+         * to get max amplitude of that chunk.
+         */
+        onAmplitudeListener: ((Int) -> Unit)? = null,
+        /**
+         * Register a callback to be invoked in recording state changes
+         */
+        onStateChangedListener: ((RecorderState, RecorderState) -> Unit)? = null,
+        /**
+         * Register a callback to get elapsed recording time in seconds
+         */
+        onTimeElapsed: ((Long) -> Unit)? = null,
+    ) {
+        if (waveConfig != null) {
+            if (recordingState != RecorderState.STOPPED) {
+                throw IllegalStateException("Please stop the recording before updating waveConfig!")
+            }
+            this.waveConfig = WaveConfig().apply(waveConfig)
+            audioRecorder?.release()
+            audioRecorder = null
+        }
+        if (onAmplitudeListener != null) {
+            this.onAmplitudeListener = onAmplitudeListener
+        }
+        if (onStateChangedListener != null) {
+            this.onStateChangedListener = onStateChangedListener
+        }
+        if (onTimeElapsed != null) {
+            this.onTimeElapsed = onTimeElapsed
         }
     }
 
+    sealed interface FilePolicy {
+
+        val file: File
+        val fileOutputStream: FileOutputStream
+        val fileInputStream: FileInputStream
+
+        open class InternalStorage(
+            private val context: Context,
+            private val fileName: String,
+        ) : FilePolicy {
+            override val file: File
+                get() = context.getFileStreamPath(fileName)
+            override val fileOutputStream: FileOutputStream
+                get() = context.openFileOutput(fileName, Context.MODE_PRIVATE)
+            override val fileInputStream: FileInputStream
+                get() = context.openFileInput(fileName)
+
+
+        }
+
+        open class ExternalStorage(
+            private val filePath: String
+        ) : FilePolicy {
+            override val file: File
+                get() = File(filePath)
+            override val fileOutputStream: FileOutputStream
+                get() = File(filePath).outputStream()
+            override val fileInputStream: FileInputStream
+                get() = File(filePath).inputStream()
+
+        }
+    }
 }

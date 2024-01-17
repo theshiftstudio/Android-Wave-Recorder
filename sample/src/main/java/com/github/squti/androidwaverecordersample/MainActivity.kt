@@ -26,6 +26,7 @@ package com.github.squti.androidwaverecordersample
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.media.AudioFormat
 import android.os.Bundle
 import android.util.Log
 import android.view.View
@@ -33,12 +34,13 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.github.squti.androidwaverecorder.RecorderState
 import com.github.squti.androidwaverecorder.WaveRecorder
-import kotlinx.android.synthetic.main.activity_main.*
+import com.github.squti.androidwaverecordersample.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.*
 import java.util.concurrent.TimeUnit
 
@@ -46,33 +48,42 @@ class MainActivity : AppCompatActivity() {
     private val PERMISSIONS_REQUEST_RECORD_AUDIO = 77
 
     private lateinit var waveRecorder: WaveRecorder
-    private lateinit var filePath: String
-    private var isRecording = false
-    private var isPaused = false
+    private lateinit var outputFile: File
+
+    private lateinit var binding: ActivityMainBinding
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
 
-        filePath = externalCacheDir?.absolutePath + "/audioFile.wav"
 
-        waveRecorder = WaveRecorder(filePath)
+        waveRecorder = WaveRecorder(
+            coroutineScope = lifecycleScope,
+            waveConfig = {
+                sampleRate = 44100
+                channels = AudioFormat.CHANNEL_IN_STEREO
+                audioEncoding = AudioFormat.ENCODING_PCM_16BIT
+            },
+            onAmplitudeListener = {
+                Log.i(TAG, "OnAmplitudeListener: $it")
+            },
+            onStateChangedListener = { _, newValue ->
+                when (newValue) {
+                    RecorderState.RECORDING -> onRecordingStarted()
+                    RecorderState.STOPPED -> onRecordingStopped()
+                    RecorderState.PAUSED -> pauseRecording()
+                }
+            },
+            onTimeElapsed = {
+                Log.e(TAG, "onCreate: time elapsed $it")
+                binding.timeTextView.text = formatTimeUnit(it * 1000)
+            },
+        )
 
-        waveRecorder.onStateChangeListener = {
-            when (it) {
-                RecorderState.RECORDING -> startRecording()
-                RecorderState.STOP -> stopRecording()
-                RecorderState.PAUSE -> pauseRecording()
-            }
-        }
-        waveRecorder.onTimeElapsed = {
-            Log.e(TAG, "onCreate: time elapsed $it")
-            timeTextView.text = formatTimeUnit(it * 1000)
-        }
+        binding.startStopRecordingButton.setOnClickListener {
 
-        startStopRecordingButton.setOnClickListener {
-
-            if (!isRecording) {
+            if (waveRecorder.recordingState != RecorderState.RECORDING) {
                 if (ContextCompat.checkSelfPermission(
                         this,
                         Manifest.permission.RECORD_AUDIO
@@ -85,37 +96,40 @@ class MainActivity : AppCompatActivity() {
                         PERMISSIONS_REQUEST_RECORD_AUDIO
                     )
                 } else {
-                    waveRecorder.startRecording()
+                    outputFile = waveRecorder.startRecording(
+                        context = this,
+                        fileName = "${UUID.randomUUID()}_${System.currentTimeMillis()}.wav"
+                    )
                 }
+                Dispatchers.IO
             } else {
                 waveRecorder.stopRecording()
             }
         }
 
-        pauseResumeRecordingButton.setOnClickListener {
-            if (!isPaused) {
+        binding.pauseResumeRecordingButton.setOnClickListener {
+            if (waveRecorder.recordingState != RecorderState.PAUSED) {
                 waveRecorder.pauseRecording()
             } else {
                 waveRecorder.resumeRecording()
             }
         }
-        showAmplitudeSwitch.setOnCheckedChangeListener { buttonView, isChecked ->
+        binding.showAmplitudeSwitch.setOnCheckedChangeListener { buttonView, isChecked ->
             if (isChecked) {
-                amplitudeTextView.text = "Amplitude : 0"
-                amplitudeTextView.visibility = View.VISIBLE
+                binding.amplitudeTextView.text = "Amplitude : 0"
+                binding.amplitudeTextView.visibility = View.VISIBLE
                 waveRecorder.onAmplitudeListener = {
-                    GlobalScope.launch(Dispatchers.Main) {
-                        amplitudeTextView.text = "Amplitude : $it"
+                    lifecycleScope.launch(Dispatchers.Main) {
+                        binding.amplitudeTextView.text = "Amplitude : $it"
                     }
                 }
 
             } else {
-                waveRecorder.onAmplitudeListener = null
-                amplitudeTextView.visibility = View.GONE
+                binding.amplitudeTextView.visibility = View.GONE
             }
         }
 
-        noiseSuppressorSwitch.setOnCheckedChangeListener { buttonView, isChecked ->
+        binding.noiseSuppressorSwitch.setOnCheckedChangeListener { buttonView, isChecked ->
             waveRecorder.noiseSuppressorActive = isChecked
             if (isChecked)
                 Toast.makeText(this, "Noise Suppressor Activated", Toast.LENGTH_SHORT).show()
@@ -123,45 +137,44 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startRecording() {
+    private fun onRecordingStarted() {
         Log.d(TAG, waveRecorder.audioSessionId.toString())
-        isRecording = true
-        isPaused = false
-        messageTextView.visibility = View.GONE
-        recordingTextView.text = "Recording..."
-        recordingTextView.visibility = View.VISIBLE
-        startStopRecordingButton.text = "STOP"
-        pauseResumeRecordingButton.text = "PAUSE"
-        pauseResumeRecordingButton.visibility = View.VISIBLE
-        noiseSuppressorSwitch.isEnabled = false
+        binding.messageTextView.visibility = View.GONE
+        binding.recordingTextView.text = "Recording..."
+        binding.recordingTextView.visibility = View.VISIBLE
+        binding.startStopRecordingButton.text = "STOP"
+        binding.pauseResumeRecordingButton.text = "PAUSE"
+        binding.pauseResumeRecordingButton.visibility = View.VISIBLE
+        binding.noiseSuppressorSwitch.isEnabled = false
     }
 
-    private fun stopRecording() {
-        isRecording = false
-        isPaused = false
-        recordingTextView.visibility = View.GONE
-        messageTextView.visibility = View.VISIBLE
-        pauseResumeRecordingButton.visibility = View.GONE
-        showAmplitudeSwitch.isChecked = false
-        Toast.makeText(this, "File saved at : $filePath", Toast.LENGTH_LONG).show()
-        startStopRecordingButton.text = "START"
-        noiseSuppressorSwitch.isEnabled = true
+    private fun onRecordingStopped() {
+        binding.recordingTextView.visibility = View.GONE
+        binding.messageTextView.visibility = View.VISIBLE
+        binding.pauseResumeRecordingButton.visibility = View.GONE
+        binding.showAmplitudeSwitch.isChecked = false
+        Toast.makeText(this, "File saved at : ${outputFile.absolutePath}", Toast.LENGTH_LONG).show()
+        binding.startStopRecordingButton.text = "START"
+        binding.noiseSuppressorSwitch.isEnabled = true
     }
 
     private fun pauseRecording() {
-        recordingTextView.text = "PAUSE"
-        pauseResumeRecordingButton.text = "RESUME"
-        isPaused = true
+        binding.recordingTextView.text = "PAUSE"
+        binding.pauseResumeRecordingButton.text = "RESUME"
     }
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<String>, grantResults: IntArray
     ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         when (requestCode) {
             PERMISSIONS_REQUEST_RECORD_AUDIO -> {
                 if ((grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED)) {
-                    waveRecorder.startRecording()
+                    outputFile = waveRecorder.startRecording(
+                        context = this,
+                        fileName = "${UUID.randomUUID()}_${System.currentTimeMillis()}.wav"
+                    )
                 }
                 return
             }

@@ -26,12 +26,16 @@ package com.github.squti.androidwaverecorder
 
 import android.media.AudioFormat
 import java.io.File
+import java.io.FileInputStream
 import java.io.RandomAccessFile
 
-internal class WaveHeaderWriter(private val filePath: String, private val waveConfig: WaveConfig) {
+internal class WaveHeaderWriter(
+    private val file: File,
+    private val inputStream: FileInputStream,
+    private val waveConfig: WaveConfig
+) {
 
     fun writeHeader() {
-        val inputStream = File(filePath).inputStream()
         val totalAudioLen = inputStream.channel.size() - 44
         val totalDataLen = totalAudioLen + 36
         val channels = if (waveConfig.channels == AudioFormat.CHANNEL_IN_MONO)
@@ -51,7 +55,7 @@ internal class WaveHeaderWriter(private val filePath: String, private val waveCo
             bitPerSample(waveConfig.audioEncoding)
         )
 
-        val randomAccessFile = RandomAccessFile(File(filePath), "rw")
+        val randomAccessFile = RandomAccessFile(file, "rw")
         randomAccessFile.seek(0)
         randomAccessFile.write(header)
         randomAccessFile.close()
